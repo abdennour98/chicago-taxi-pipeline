@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Données et volumes locaux (ne jamais versionner les données)
+warehouse/
+*.parquet
+*.csv
+
+# Logs Airflow
+logs/
+
+# Secrets et clés cloud
+.env
+*.pem
+*.json.key
+service-account*.json
+credentials*.json
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# IDE / système
+.idea/
+.vscode/
+.DS_Store

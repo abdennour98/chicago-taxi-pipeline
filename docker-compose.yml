@@ -1,0 +1,241 @@
+name: taxi-airflow
+
+# =============================================================================
+# Airflow (LocalExecutor) + Spark standalone + MinIO + Postgres + Iceberg + Trino
+#
+# Architecture médaillon :
+#   bronze -> MinIO, bucket s3a://bronze/            (fichiers bruts)
+#   silver -> Iceberg, tables  silver.<table>        (écrites par Spark)
+#   gold   -> Iceberg, tables  gold.<table>          (construites/servies par Trino)
+# Les données Iceberg (silver + gold) sont stockées dans le bucket s3://warehouse/.
+#
+# Connexion Spark ultra simple : toute la config est dans ./conf/spark-defaults.conf
+#   spark = SparkSession.builder.getOrCreate()   # c'est tout
+#
+# Fichiers/dossiers à côté de ce fichier :
+#   ./dags ./jobs ./src            -> code (PYTHONPATH=/opt/src)
+#   ./conf/spark-defaults.conf     -> config Spark (MinIO + Iceberg + cluster)
+#   ./init-iceberg.sql             -> base "iceberg" (catalogue) dans Postgres
+#   ./trino/catalog/iceberg.properties
+#
+# Lancement : docker compose up -d --build
+# UIs : Airflow http://localhost:8080 (admin/admin) | Spark http://localhost:8081
+#       MinIO http://localhost:9001 (minioadmin/minioadmin) | Trino http://localhost:8083
+# =============================================================================
+
+x-minio-env: &minio-env
+  S3_ENDPOINT: http://minio:9000
+  S3_ACCESS_KEY: minioadmin
+  S3_SECRET_KEY: minioadmin
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+
+x-spark-image: &spark-image
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM python:3.11-slim-bookworm
+      RUN apt-get update \
+       && apt-get install -y --no-install-recommends openjdk-17-jre-headless curl procps \
+       && rm -rf /var/lib/apt/lists/* \
+       && ln -s "$$(dirname "$$(dirname "$$(readlink -f "$$(which java)")")")" /opt/java
+      ENV JAVA_HOME=/opt/java
+      RUN pip install --no-cache-dir pyspark==3.5.1 boto3 requests
+      ENV SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
+      # S3A (MinIO) + Iceberg + driver Postgres (catalogue)
+      RUN curl -fsSL -o $$SPARK_HOME/jars/hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
+       && curl -fsSL -o $$SPARK_HOME/jars/aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar \
+       && curl -fsSL -o $$SPARK_HOME/jars/iceberg-spark-runtime-3.5_2.12-1.6.1.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.6.1/iceberg-spark-runtime-3.5_2.12-1.6.1.jar \
+       && curl -fsSL -o $$SPARK_HOME/jars/postgresql-42.7.4.jar https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+  image: taxi-spark:3.5.1
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM apache/airflow:2.10.4-python3.11
+      USER root
+      RUN apt-get update \
+       && apt-get install -y --no-install-recommends openjdk-17-jre-headless curl procps \
+       && rm -rf /var/lib/apt/lists/* \
+       && ln -s "$$(dirname "$$(dirname "$$(readlink -f "$$(which java)")")")" /opt/java
+      USER airflow
+      ENV JAVA_HOME=/opt/java
+      # Contraintes officielles Airflow (évite ResolutionTooDeep), sauf pyspark qu'on épingle nous-mêmes
+      RUN curl -fsSL -o /tmp/constraints-all.txt https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.11.txt \
+       && grep -vi '^pyspark==' /tmp/constraints-all.txt > /tmp/constraints.txt \
+       && pip install --no-cache-dir -c /tmp/constraints.txt pyspark==3.5.1 apache-airflow-providers-apache-spark boto3 requests
+      # S3A (MinIO) + Iceberg + driver Postgres : le driver Spark tourne dans le scheduler
+      RUN J="$$(python -c 'import pyspark,os;print(os.path.join(os.path.dirname(pyspark.__file__),"jars"))')" \
+       && curl -fsSL -o $$J/hadoop-aws-3.3.4.jar https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
+       && curl -fsSL -o $$J/aws-java-sdk-bundle-1.12.262.jar https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar \
+       && curl -fsSL -o $$J/iceberg-spark-runtime-3.5_2.12-1.6.1.jar https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.6.1/iceberg-spark-runtime-3.5_2.12-1.6.1.jar \
+       && curl -fsSL -o $$J/postgresql-42.7.4.jar https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar
+  image: taxi-airflow:2.10.4
+  environment: &airflow-env
+    <<: *minio-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__SECRET_KEY: local-dev-secret-key   # même clé webserver/scheduler
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW_CONN_SPARK_DEFAULT: '{"conn_type": "spark", "host": "spark://spark-master", "port": 7077}'
+    PYTHONPATH: /opt/src
+    SPARK_CONF_DIR: /opt/spark-conf   # Spark lit ici spark-defaults.conf
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./jobs:/opt/airflow/jobs
+    - ./src:/opt/src
+    - ./conf:/opt/spark-conf:ro
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  # ---------------------------------------------------------------- Stockage
+  minio:
+    # Les images officielles MinIO (Docker Hub puis quay.io) ne sont plus téléchargeables.
+    # Fork communautaire pgsty, version épinglée.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # console web
+    volumes:
+      - minio_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Crée la base "iceberg" (catalogue). Ne s'exécute que sur un volume pg_data vide.
+      - ./init-iceberg.sql:/docker-entrypoint-initdb.d/init-iceberg.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------------- Spark
+  spark-master:
+    <<: *spark-image
+    hostname: spark-master
+    command: >
+      /usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8080
+    environment:
+      <<: *minio-env
+      PYTHONPATH: /opt/src
+    volumes:
+      - ./src:/opt/src
+      - ./jobs:/opt/jobs
+    ports:
+      - "8081:8080"   # UI Spark master
+      - "7077:7077"
+
+  spark-worker:
+    image: taxi-spark:3.5.1   # construite une seule fois par spark-master
+    depends_on:
+      - spark-master
+    command: >
+      /usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+      --cores 2 --memory 3g --webui-port 8081
+    environment:
+      <<: *minio-env
+      PYTHONPATH: /opt/src
+    volumes:
+      - ./src:/opt/src
+      - ./jobs:/opt/jobs
+    ports:
+      - "8082:8081"   # UI worker
+
+  # ----------------------------------------------------------------- Airflow
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create --username admin --password admin \
+          --firstname Admin --lastname User --role Admin --email admin@example.com || true
+        python - <<'PY'
+        import time, boto3, os
+        s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT"],
+                          aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+                          aws_secret_access_key=os.environ["S3_SECRET_KEY"], region_name="us-east-1")
+        for _ in range(30):
+            try:
+                existing = {b["Name"] for b in s3.list_buckets()["Buckets"]}
+                for b in ("bronze", "warehouse"):   # warehouse = Iceberg (silver + gold)
+                    if b not in existing:
+                        s3.create_bucket(Bucket=b)
+                print("buckets ready")
+                break
+            except Exception as e:
+                print("waiting for minio...", e); time.sleep(2)
+        else:
+            raise SystemExit("minio not reachable")
+        PY
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    hostname: airflow-scheduler   # les executors Spark se reconnectent au driver via ce nom
+    command: scheduler
+    depends_on:
+      spark-master:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ------------------------------------------------------------------- Trino
+  # Moteur SQL sur les tables Iceberg : construit et sert la couche gold.
+  trino:
+    image: trinodb/trino:470   # version épinglée : vérifie la dernière sur Docker Hub
+    ports:
+      - "8083:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  minio_data:
+  pg_data:
+  airflow_logs:
