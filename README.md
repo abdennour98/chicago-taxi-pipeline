@@ -50,7 +50,6 @@ On suit l'architecture **médaillon** : les données passent par trois étapes, 
 - **Source** : [Taxi Trips 2013-2023 – ville de Chicago](https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew)
 - Le fichier complet pèse plusieurs dizaines de Go : on n'en télécharge **qu'une tranche**.
 - **Période choisie : du 1er janvier au 31 mars 2023** (1er trimestre 2023), filtrée sur `trip_start_timestamp`.
-- Nombre de lignes obtenues : `_____` (à noter après le premier lancement, le script les compte pour toi).
 
 Le téléchargement passe par l'API SODA : on découpe les courses en pages de 50 000 lignes, et Spark
 télécharge plusieurs pages en même temps (chaque page devient un fichier Parquet, rangé dans un dossier par mois).
