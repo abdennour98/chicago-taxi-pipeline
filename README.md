@@ -121,18 +121,6 @@ SELECT * FROM iceberg.gold.area_activity ORDER BY pickups DESC LIMIT 10;
 Tape `quit` pour sortir. Tu peux aussi brancher un outil comme DBeaver, Superset ou Metabase sur Trino
 (hôte `localhost`, port `8083`, catalogue `iceberg`, pas de mot de passe).
 
-### Avec Spark (Python)
-
-```bash
-docker compose exec airflow-scheduler python
-```
-
-```python
-from pyspark.sql import SparkSession
-spark = SparkSession.builder.getOrCreate()
-spark.sql("SELECT * FROM gold.daily_kpis").show()
-```
-
 ### Regarder les fichiers bruts
 
 Dans MinIO (http://localhost:9001) : le bucket `bronze` contient les fichiers Parquet du téléchargement,
