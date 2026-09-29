@@ -72,7 +72,7 @@ docker compose ps
 
 ## 6. Suivre le pipeline
 
-Le DAG **`taxi_pipeline`** démarre tout seul. Ouvre Airflow (http://localhost:8080) et clique dessus :
+Le DAG **`taxi_pipeline`** démarre tout seul. Ouvre Airflow (http://localhost:8080) (admin/admin) et clique dessus :
 
 
 | Tâche | Ce qu'elle fait | Ce que tu dois voir dans les logs |
@@ -102,7 +102,7 @@ Tape `quit` pour sortir. Tu peux aussi brancher un outil comme DBeaver, Superset
 
 ### Regarder les fichiers bruts
 
-Dans MinIO (http://localhost:9001) : le bucket `bronze` contient les fichiers Parquet du téléchargement,
+Dans MinIO (http://localhost:9001) ((minioadmin/minioadmin)) : le bucket `bronze` contient les fichiers Parquet du téléchargement,
 le bucket `warehouse` contient les fichiers des tables Iceberg (silver et gold).
 
 ## 8. Ce que fait chaque étape
