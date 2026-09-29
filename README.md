@@ -6,7 +6,7 @@ Tout tourne en local avec une seule commande Docker.
 
 ---
 
-## 1. L'idée en deux minutes
+## 1. L'idée 
 
 On suit l'architecture **médaillon** : les données passent par trois étapes, de plus en plus propres.
 
@@ -32,7 +32,7 @@ On suit l'architecture **médaillon** : les données passent par trois étapes, 
    Trino  →  on interroge tout ça en SQL (ou depuis un outil de BI)
 ```
 
-**Airflow** lance les étapes dans l'ordre : `bronze → silver → gold → check_gold`.
+**Airflow** lance les étapes dans l'ordre : `bronze → silver → gold`.
 
 ## 2. Les outils, et à quoi ils servent
 
@@ -51,14 +51,9 @@ On suit l'architecture **médaillon** : les données passent par trois étapes, 
 - Le fichier complet pèse plusieurs dizaines de Go : on n'en télécharge **qu'une tranche**.
 - **Période choisie : du 1er janvier au 31 mars 2023** (1er trimestre 2023), filtrée sur `trip_start_timestamp`.
 
-Le téléchargement passe par l'API SODA : on découpe les courses en pages de 50 000 lignes, et Spark
-télécharge plusieurs pages en même temps (chaque page devient un fichier Parquet, rangé dans un dossier par mois).
-Pour changer de période, modifie la liste `MOIS` en haut de `jobs/ingest_bronze.py`.
-
 ## 4. Ce qu'il faut avoir avant de commencer
 
 - **Docker Desktop** installé et démarré
-- Environ **8 Go de mémoire** libre pour Docker
 - De la patience au premier lancement : Docker télécharge Java, Spark et plusieurs bibliothèques (compte quelques minutes, parfois plus)
 
 ## 5. Lancer le projet
@@ -75,34 +70,18 @@ Vérifie que tout est en route :
 docker compose ps
 ```
 
-C'est normal que le conteneur `airflow-init` soit « Exited (0) » : il prépare la base et les buckets, puis s'arrête.
-
 ## 6. Suivre le pipeline
 
 Le DAG **`taxi_pipeline`** démarre tout seul. Ouvre Airflow (http://localhost:8080) et clique dessus :
 
-- 🟩 vert clair = en cours, 🟢 vert foncé = terminé, 🟥 rouge = échec
-- Clique sur une tâche puis **Logs** pour voir ce qu'elle raconte.
 
 | Tâche | Ce qu'elle fait | Ce que tu dois voir dans les logs |
 |-------|-----------------|-----------------------------------|
 | `bronze` | Télécharge les données (en parallèle) et les dépose dans MinIO | « Mois 2023-01 : … courses à télécharger », puis « Bronze terminé » |
 | `silver` | Nettoie et crée `silver.trips` | Le nombre de lignes bronze et silver |
 | `gold` | Crée les trois tables d'indicateurs | Pas d'erreur |
-| `check_gold` | Vérifie que les tables gold ne sont pas vides | Le nombre de lignes par table |
 
-Pour relancer le pipeline : bouton **Trigger** dans Airflow, ou
-
-```bash
-docker compose exec airflow-scheduler airflow dags trigger taxi_pipeline
-```
-
-Pour lancer seulement le téléchargement (sans Airflow) :
-
-```bash
-docker compose exec airflow-scheduler spark-submit /opt/airflow/jobs/ingest_bronze.py
-```
-
+Pour relancer le pipeline : bouton **Trigger** dans Airflow
 ## 7. Interroger les données
 
 ### Avec Trino (du SQL simple)
@@ -135,8 +114,6 @@ Un dossier par mois : `bronze/taxi_trips/month=2023-01/`. Si on relance, seuls l
 - les colonnes reçoivent le bon type (dates, nombres…) ;
 - les courses sans identifiant ou sans date sont supprimées ;
 - une course = une ligne (suppression des doublons) ;
-- les courses aberrantes sont écartées (durée nulle, distance ou montant négatif) ;
-- les valeurs manquantes sont remplacées (`Unknown` pour l'entreprise et le moyen de paiement, 0 pour les pourboires).
 
 **Gold** – on calcule des indicateurs utiles :
 
@@ -161,55 +138,20 @@ init-iceberg.sql            → crée la base Postgres du catalogue Iceberg
 src/spark_session.py        → petit outil Python optionnel pour ouvrir Spark
 ```
 
-## 10. Arrêter et nettoyer
 
-```bash
-docker compose down          # arrête tout, garde les données
-docker compose down -v       # arrête tout ET efface toutes les données (à utiliser pour repartir de zéro)
-```
-
-## 11. Quand ça ne marche pas
-
-| Problème | Piste |
-|----------|-------|
-| Une tâche est rouge dans Airflow | Ouvre la tâche → **Logs**, lis les dernières lignes |
-| `Catalog 'iceberg' not found` dans Trino | Le fichier `trino/catalog/iceberg.properties` manque ou est mal placé, puis `docker compose up -d --force-recreate trino` |
-| `Table … does not exist` dans Trino | L'étape `silver` ou `gold` n'a pas encore fini dans Airflow |
-| Le DAG n'apparaît pas | `docker compose exec airflow-scheduler airflow dags list-import-errors` |
-| La base `iceberg` n'existe pas dans Postgres | Le script `init-iceberg.sql` ne s'exécute que sur un volume vide : `docker compose down -v` puis relance |
-| Les ports 8080 / 8081 / 9001 sont déjà pris | Ferme le programme qui les utilise, ou change le port dans `docker-compose.yml` |
-
----
-
-## 12. Prochaine optimisation : ingestion bronze avec le partitionnement Spark
+## 10. Prochaine optimisation : ingestion bronze avec le partitionnement Spark
 
 **Le problème.** Une ingestion écrite en Python simple télécharge les pages de l'API **une par une** :
 c'est lent, car on attend la réponse de chaque page avant de demander la suivante, et un seul processeur travaille.
 
 **L'idée.** Découper le travail en petits morceaux indépendants et laisser Spark les faire **en parallèle** :
 
-```
- Avant (séquentiel)                      Après (partitionné avec Spark)
 
- page 1 → page 2 → page 3 → ...          page 1 ┐
- (un seul travailleur)                   page 2 ├─► plusieurs cœurs en même temps
-                                         page 3 ┘   (1 page = 1 partition Spark)
-```
-
-**Comment ça marche.**
-1. Le driver demande à l'API combien de courses il y a chaque mois, puis calcule la liste des pages (une page = 50 000 lignes).
-2. Cette liste est distribuée à Spark (`parallelize`), avec **une partition par page**.
-3. Chaque cœur télécharge « ses » pages en même temps que les autres.
-4. Le résultat est écrit en Parquet avec `partitionBy("month")` : un dossier par mois (`month=2023-01/`), un fichier par page.
-5. En relançant, seuls les mois concernés sont remplacés (`partitionOverwriteMode=dynamic`) : pas de doublons.
-
-
-
-## 13. Migration vers le cloud : GCP (Google Cloud Platform)
+## 11. Migration vers le cloud : GCP (Google Cloud Platform)
 
 ### Pourquoi migrer ?
 
-En local, tout dépend de ton ordinateur : sa mémoire, son disque, sa connexion.
+En local, tout dépend de  l'ordinateur : sa mémoire, son disque, sa connexion.
 Dans le cloud, le stockage est presque illimité, on peut lancer beaucoup plus de cœurs Spark quand il le faut
 (et ne payer que pendant le calcul), et le pipeline peut tourner sans que ton ordinateur soit allumé.
 
@@ -250,12 +192,3 @@ Dans le cloud, le stockage est presque illimité, on peut lancer beaucoup plus d
               │
               ▼
        BigQuery  ──►  Looker Studio (tableaux de bord)  /  requêtes SQL
-
-
- Autour du pipeline :
-   Cloud Composer (Airflow)   → lance et surveille bronze → silver → gold → check
-   Cloud SQL (Postgres)       → catalogue des tables Iceberg
-   Secret Manager + IAM       → accès et mots de passe
-   Cloud Logging / Monitoring → logs et alertes
-   Terraform                  → tout l'environnement décrit en code
-```
