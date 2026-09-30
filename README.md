@@ -10,27 +10,8 @@ Tout tourne en local avec une seule commande Docker.
 
 On suit l'architecture **médaillon** : les données passent par trois étapes, de plus en plus propres.
 
-```
-  API de Chicago
-        │  Spark : téléchargement des pages en parallèle
-        ▼
- ┌──────────────┐
- │   BRONZE     │  Les données brutes, telles quelles (fichiers Parquet dans MinIO)
- └──────┬───────┘
-        │  Spark : typage, doublons, nettoyage
-        ▼
- ┌──────────────┐
- │   SILVER     │  Les données propres (table Iceberg  silver.trips)
- └──────┬───────┘
-        │  Spark : agrégations et jointures
-        ▼
- ┌──────────────┐
- │    GOLD      │  Les indicateurs prêts pour l'analyse (tables Iceberg  gold.*)
- └──────┬───────┘
-        │
-        ▼
-   Trino  →  on interroge tout ça en SQL (ou depuis un outil de BI)
-```
+<img width="1536" height="1024" alt="archi taxi trips" src="https://github.com/user-attachments/assets/e3df196d-cfa5-4618-9e29-1b46d2041344" />
+
 
 **Airflow** lance les étapes dans l'ordre : `bronze → silver → gold`.
 
@@ -166,29 +147,3 @@ Dans le cloud, le stockage est presque illimité, on peut lancer beaucoup plus d
 | Trino | **BigQuery** (tables Iceberg via BigLake) | SQL rapide sur les tables, sans serveur à gérer |
 | (rien) | **Looker Studio** | Tableaux de bord sur le gold |
 | Mots de passe dans le compose | **Secret Manager** + **IAM** (comptes de service) | Plus aucun mot de passe dans le code |
-
-### Nouvelle architecture
-
-```
-  API de Chicago
-        │  Spark (Dataproc Serverless) : téléchargement des pages en parallèle
-        ▼
- ┌──────────────────────────┐
- │  BRONZE                  │  Cloud Storage  gs://<projet>-bronze/taxi_trips/month=AAAA-MM/
- │  Parquet bruts           │
- └────────────┬─────────────┘
-              │  Spark (Dataproc Serverless) : typage, doublons, nettoyage
-              ▼
- ┌──────────────────────────┐
- │  SILVER                  │  Tables Iceberg  silver.trips
- │  données propres         │  fichiers dans Cloud Storage  gs://<projet>-warehouse/
- └────────────┬─────────────┘
-              │  Spark (Dataproc Serverless) : agrégations et jointures
-              ▼
- ┌──────────────────────────┐
- │  GOLD                    │  Tables Iceberg  gold.*
- │  indicateurs             │  (même bucket warehouse)
- └────────────┬─────────────┘
-              │
-              ▼
-       BigQuery  ──►  Looker Studio (tableaux de bord)  /  requêtes SQL
