@@ -10,7 +10,8 @@ Tout tourne en local avec une seule commande Docker.
 
 On suit l'architecture **médaillon** : les données passent par trois étapes, de plus en plus propres.
 
-![archi taxi trips](https://github.com/user-attachments/assets/7e3c2dcf-f8fb-443f-9c1f-19fcfd689637)
+![archi taxi trips](https://github.com/user-attachments/assets/a8fff67f-4d9c-4ffb-8c01-2cd04237a0e3)
+
 
 
 
