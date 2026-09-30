@@ -10,7 +10,8 @@ Tout tourne en local avec une seule commande Docker.
 
 On suit l'architecture **médaillon** : les données passent par trois étapes, de plus en plus propres.
 
-<img width="1536" height="1024" alt="archi taxi trips" src="https://github.com/user-attachments/assets/e3df196d-cfa5-4618-9e29-1b46d2041344" />
+![archi taxi trips](https://github.com/user-attachments/assets/7e3c2dcf-f8fb-443f-9c1f-19fcfd689637)
+
 
 
 **Airflow** lance les étapes dans l'ordre : `bronze → silver → gold`.
